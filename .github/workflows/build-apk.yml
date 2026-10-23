@@ -108,6 +108,7 @@ jobs:
           import com.getcapacitor.annotation.CapacitorPlugin
           import io.livekit.android.LiveKit
           import io.livekit.android.room.Room
+          import io.livekit.android.room.track.screencapture.ScreenCaptureParams
           import kotlinx.coroutines.CoroutineScope
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.SupervisorJob
@@ -148,7 +149,7 @@ jobs:
                           stopInternal()
                           val newRoom = LiveKit.create(context.applicationContext)
                           newRoom.connect(url, token)
-                          newRoom.localParticipant.setScreenShareEnabled(true, data)
+                          newRoom.localParticipant.setScreenShareEnabled(true, ScreenCaptureParams(data))
                           room = newRoom
                           call.resolve()
                       } catch (e: Exception) {
