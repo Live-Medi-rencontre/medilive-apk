@@ -255,6 +255,52 @@ jobs:
           print("Patch Android terminé")
           PY
 
+      - name: Ajouter le logo Medi-Live comme icône de l'appli
+        shell: bash
+        run: |
+          python3 -m pip install --quiet --break-system-packages pillow || python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          import pathlib, sys
+          from PIL import Image
+
+          src = pathlib.Path("icon.png")
+          if not src.exists():
+              print("icon.png absent : icône par défaut conservée")
+              sys.exit(0)
+
+          img = Image.open(src).convert("RGBA")
+          w, h = img.size
+          side = max(w, h)
+          sq = Image.new("RGBA", (side, side), (255, 255, 255, 255))
+          sq.paste(img, ((side - w) // 2, (side - h) // 2), img)
+
+          res = pathlib.Path("android/app/src/main/res")
+          sizes = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
+          for d, px in sizes.items():
+              folder = res / ("mipmap-" + d)
+              folder.mkdir(parents=True, exist_ok=True)
+              icon = sq.resize((px, px), Image.LANCZOS)
+              icon.save(folder / "ic_launcher.png")
+              icon.save(folder / "ic_launcher_round.png")
+              fpx = px * 108 // 48
+              inner = int(fpx * 0.60)
+              fg = Image.new("RGBA", (fpx, fpx), (255, 255, 255, 0))
+              logo = sq.resize((inner, inner), Image.LANCZOS)
+              fg.paste(logo, ((fpx - inner) // 2, (fpx - inner) // 2))
+              fg.save(folder / "ic_launcher_foreground.png")
+
+          anydpi = res / "mipmap-anydpi-v26"
+          anydpi.mkdir(parents=True, exist_ok=True)
+          xml = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                 '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                 '    <background android:drawable="@android:color/white"/>\n'
+                 '    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n'
+                 '</adaptive-icon>\n')
+          (anydpi / "ic_launcher.xml").write_text(xml)
+          (anydpi / "ic_launcher_round.xml").write_text(xml)
+          print("Logo Medi-Live installé comme icône")
+          PY
+
       - name: Synchroniser Capacitor
         shell: bash
         run: npx cap sync android
