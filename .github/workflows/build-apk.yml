@@ -1,0 +1,290 @@
+name: Fabriquer l'APK Medi-Live
+
+# Ce seul fichier fabrique tout : projet Capacitor, plugin Kotlin de partage d'écran (LiveKit) et APK.
+# L'APK ouvre le site Render : c'est la même application que sur le web.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  SITE_URL: https://live-rencontre-serveur.onrender.com
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Installer Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Créer le projet Capacitor
+        shell: bash
+        run: |
+          mkdir -p www
+          cat > www/index.html <<'EOF'
+          <!doctype html>
+          <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Medi-Live</title></head>
+          <body style="font-family:sans-serif;background:#0b0c10;color:#fff;text-align:center;padding:40px">
+          <h2>Medi-Live</h2><p>Connexion au site…</p>
+          <p><a style="color:#7dd3fc" href="https://live-rencontre-serveur.onrender.com">Ouvrir le site</a></p>
+          </body></html>
+          EOF
+          cat > package.json <<'EOF'
+          {
+            "name": "medilive-apk",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/android": "^8.0.0",
+              "@capacitor/core": "^8.0.0"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^8.0.0"
+            }
+          }
+          EOF
+          cat > capacitor.config.json <<EOF
+          {
+            "appId": "com.medilive.app",
+            "appName": "Medi-Live",
+            "webDir": "www",
+            "server": {
+              "url": "$SITE_URL",
+              "cleartext": false
+            }
+          }
+          EOF
+          npm install
+          npx cap add android
+
+      - name: Ajouter le plugin Kotlin de partage d'écran
+        shell: bash
+        run: |
+          KDIR=android/app/src/main/java/com/medilive/app
+          mkdir -p "$KDIR"
+          find android/app/src/main -name 'MainActivity.java' -delete
+
+          cat > "$KDIR/MainActivity.kt" <<'EOF'
+          package com.medilive.app
+
+          import android.os.Bundle
+          import com.getcapacitor.BridgeActivity
+
+          class MainActivity : BridgeActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  registerPlugin(ScreenSharePlugin::class.java)
+                  super.onCreate(savedInstanceState)
+              }
+          }
+          EOF
+
+          cat > "$KDIR/ScreenSharePlugin.kt" <<'EOF'
+          package com.medilive.app
+
+          import android.app.Activity
+          import android.content.Context
+          import android.media.projection.MediaProjectionManager
+          import androidx.activity.result.ActivityResult
+          import com.getcapacitor.Plugin
+          import com.getcapacitor.PluginCall
+          import com.getcapacitor.PluginMethod
+          import com.getcapacitor.annotation.ActivityCallback
+          import com.getcapacitor.annotation.CapacitorPlugin
+          import io.livekit.android.LiveKit
+          import io.livekit.android.room.Room
+          import kotlinx.coroutines.CoroutineScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.SupervisorJob
+          import kotlinx.coroutines.launch
+
+          /* Plugin "ScreenShare" appelé par index.html : start({url, token}) et stop().
+             Il demande l'autorisation de capture à Android, se connecte à LiveKit avec le jeton
+             reçu du serveur, puis publie l'écran du téléphone. */
+          @CapacitorPlugin(name = "ScreenShare")
+          class ScreenSharePlugin : Plugin() {
+              private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+              private var room: Room? = null
+
+              @PluginMethod
+              fun start(call: PluginCall) {
+                  val url = call.getString("url")
+                  val token = call.getString("token")
+                  if (url.isNullOrEmpty() || token.isNullOrEmpty()) {
+                      call.reject("Adresse ou jeton manquant")
+                      return
+                  }
+                  val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  startActivityForResult(call, manager.createScreenCaptureIntent(), "onProjectionResult")
+              }
+
+              @ActivityCallback
+              private fun onProjectionResult(call: PluginCall?, result: ActivityResult?) {
+                  if (call == null) return
+                  val data = result?.data
+                  if (result == null || result.resultCode != Activity.RESULT_OK || data == null) {
+                      call.reject("Autorisation refusée")
+                      return
+                  }
+                  val url = call.getString("url") ?: ""
+                  val token = call.getString("token") ?: ""
+                  scope.launch {
+                      try {
+                          stopInternal()
+                          val newRoom = LiveKit.create(context.applicationContext)
+                          newRoom.connect(url, token)
+                          newRoom.localParticipant.setScreenShareEnabled(true, data)
+                          room = newRoom
+                          call.resolve()
+                      } catch (e: Exception) {
+                          stopInternal()
+                          call.reject(e.message ?: "Erreur de partage d'écran")
+                      }
+                  }
+              }
+
+              @PluginMethod
+              fun stop(call: PluginCall) {
+                  stopInternal()
+                  call.resolve()
+              }
+
+              private fun stopInternal() {
+                  val r = room ?: return
+                  room = null
+                  try {
+                      r.disconnect()
+                      r.release()
+                  } catch (e: Exception) {
+                  }
+              }
+
+              override fun handleOnDestroy() {
+                  stopInternal()
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          import re, sys, pathlib
+
+          def fail(msg):
+              print("ERREUR :", msg)
+              sys.exit(1)
+
+          root = pathlib.Path("android/build.gradle")
+          app = pathlib.Path("android/app/build.gradle")
+          man = pathlib.Path("android/app/src/main/AndroidManifest.xml")
+          for f in (root, app, man):
+              if not f.exists():
+                  fail("fichier introuvable : " + str(f))
+
+          # 1) build.gradle racine : plugin Kotlin + dépôt JitPack
+          s = root.read_text()
+          if "kotlin-gradle-plugin" not in s:
+              s, n = re.subn(r"(classpath\s+['\"]com\.android\.tools\.build:gradle:[^'\"]+['\"])",
+                             r"\1\n        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.20'", s, count=1)
+              if n == 0:
+                  fail("ligne classpath du plugin Android introuvable dans android/build.gradle")
+          if "jitpack.io" not in s:
+              s += "\nallprojects {\n    repositories {\n        maven { url 'https://jitpack.io' }\n    }\n}\n"
+          root.write_text(s)
+
+          # 2) app/build.gradle : Kotlin + LiveKit + Java 21
+          a = app.read_text()
+          if "kotlin-android" not in a and "org.jetbrains.kotlin.android" not in a:
+              m = re.search(r"apply plugin:\s*['\"]com\.android\.application['\"]", a)
+              if m:
+                  a = a[:m.end()] + "\napply plugin: 'kotlin-android'" + a[m.end():]
+              else:
+                  m = re.search(r"id\s*\(?\s*['\"]com\.android\.application['\"]\s*\)?", a)
+                  if not m:
+                      fail("plugin com.android.application introuvable dans android/app/build.gradle")
+                  a = a[:m.end()] + "\n    id 'kotlin-android'" + a[m.end():]
+          if "livekit-android" not in a:
+              a, n = re.subn(r"(?m)^dependencies\s*\{",
+                             "dependencies {\n    implementation 'io.livekit:livekit-android:2.26.1'\n    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'",
+                             a, count=1)
+              if n == 0:
+                  fail("bloc dependencies introuvable dans android/app/build.gradle")
+          a += """
+          android {
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_21
+                  targetCompatibility JavaVersion.VERSION_21
+              }
+          }
+          kotlin {
+              compilerOptions {
+                  jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+              }
+          }
+          """
+          app.write_text(a)
+
+          # 3) AndroidManifest.xml : permissions + service de capture d'écran de LiveKit
+          x = man.read_text()
+          perms = ["android.permission.INTERNET", "android.permission.CAMERA", "android.permission.RECORD_AUDIO",
+                   "android.permission.MODIFY_AUDIO_SETTINGS", "android.permission.FOREGROUND_SERVICE",
+                   "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION", "android.permission.POST_NOTIFICATIONS"]
+          if "<application" not in x or "</application>" not in x:
+              fail("balise application introuvable dans AndroidManifest.xml")
+          add = "".join('<uses-permission android:name="%s" />\n    ' % p for p in perms if p not in x)
+          x = x.replace("<application", add + "<application", 1)
+          if "ScreenCaptureService" not in x:
+              svc = ('<service android:name="io.livekit.android.room.track.screencapture.ScreenCaptureService" '
+                     'android:exported="false" android:foregroundServiceType="mediaProjection" />\n    ')
+              x = x.replace("</application>", svc + "</application>", 1)
+          man.write_text(x)
+          print("Patch Android terminé")
+          PY
+
+      - name: Synchroniser Capacitor
+        shell: bash
+        run: npx cap sync android
+
+      - name: Fabriquer l'APK
+        shell: bash
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace 2>&1 | tee build.log
+
+      - name: Résumé de l'erreur (si la fabrication échoue)
+        if: failure()
+        shell: bash
+        run: |
+          echo '### Erreur : dernières lignes du journal' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f android/build.log ]; then tail -n 60 android/build.log >> "$GITHUB_STEP_SUMMARY"; else echo "Voir l'étape en rouge ci-dessus." >> "$GITHUB_STEP_SUMMARY"; fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publier l'APK (téléchargement direct)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk medilive.apk
+          gh release create "apk-${{ github.run_number }}" medilive.apk --title "Medi-Live APK n°${{ github.run_number }}" --notes "APK de test (version debug) qui ouvre le site Medi-Live."
+
+      - name: Garder aussi l'APK dans les artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: medilive-apk
+          path: medilive.apk
+          
