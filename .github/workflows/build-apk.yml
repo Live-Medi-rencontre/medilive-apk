@@ -263,16 +263,24 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace 2>&1 | tee build.log
+          ./gradlew assembleDebug --console=plain 2>&1 | tee build.log
 
       - name: Résumé de l'erreur (si la fabrication échoue)
         if: failure()
         shell: bash
         run: |
-          echo '### Erreur : dernières lignes du journal' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          if [ -f android/build.log ]; then tail -n 60 android/build.log >> "$GITHUB_STEP_SUMMARY"; else echo "Voir l'étape en rouge ci-dessus." >> "$GITHUB_STEP_SUMMARY"; fi
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '### Erreur : causes trouvées dans le journal'
+            echo '```'
+            if [ -f android/build.log ]; then
+              grep -n -E '^e: |^e: file|error:|FAILED|What went wrong|Caused by' android/build.log | head -n 40
+              echo '--- bloc What went wrong ---'
+              grep -n -A 15 'What went wrong' android/build.log | head -n 40
+            else
+              echo "Voir l'étape en rouge ci-dessus."
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publier l'APK (téléchargement direct)
         shell: bash
@@ -287,4 +295,3 @@ jobs:
         with:
           name: medilive-apk
           path: medilive.apk
-          
